@@ -3,7 +3,7 @@ import * as d3 from 'd3';
 
 // ─── API ─────────────────────────────────────────────────────────────────────
 
-const API_BASE = process.env.REACT_APP_API_URL || '';
+const API_BASE = 'https://dl-final-project.onrender.com';
 
 async function fetchStockData(stockNo, months = 1) {
   const res = await fetch(`${API_BASE}/api/stock/${stockNo}?months=${months}`);
@@ -17,9 +17,9 @@ async function fetchStockData(stockNo, months = 1) {
 // ─── Model config ─────────────────────────────────────────────────────────────
 
 const MODEL_CONFIG = {
-  LSTM:        { color: '#7C3AED', label: 'LSTM',        dash: '0' },
-  GRU:         { color: '#EA580C', label: 'GRU',         dash: '0' },
-  BiLSTM:      { color: '#0891B2', label: 'BiLSTM',      dash: '0' },
+  LSTM: { color: '#7C3AED', label: 'LSTM', dash: '0' },
+  GRU: { color: '#EA580C', label: 'GRU', dash: '0' },
+  BiLSTM: { color: '#0891B2', label: 'BiLSTM', dash: '0' },
   Transformer: { color: '#059669', label: 'Transformer', dash: '0' },
 };
 

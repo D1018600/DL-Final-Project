@@ -1,12 +1,13 @@
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-import httpx
 from datetime import datetime, timedelta
 from typing import Optional
 import logging
 import numpy as np
 import onnxruntime as ort
 import os
+import yfinance as yf
+import pandas as pd
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -15,19 +16,16 @@ app = FastAPI(title="Stock API", version="1.0.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-TWSE_URL = "https://www.twse.com.tw/exchangeReport/STOCK_DAY"
-
 # ─── ONNX Model Loading ───────────────────────────────────────────────────────
 
 MODEL_DIR = os.path.join(os.path.dirname(__file__), "models")
 
-# 每個模型對應的 window 大小
 MODEL_FILES = {
     "LSTM":        ("LSTM_stock_model.onnx",        19),
     "GRU":         ("GRU_stock_model.onnx",         19),
@@ -35,7 +33,7 @@ MODEL_FILES = {
     "Transformer": ("Transformer_stock_model.onnx", 19),
 }
 
-MODELS: dict[str, tuple[ort.InferenceSession, int]] = {}  # name -> (session, seq_len)
+MODELS: dict[str, tuple[ort.InferenceSession, int]] = {}
 
 def load_models():
     for key, (filename, seq_len) in MODEL_FILES.items():
@@ -52,7 +50,57 @@ def load_models():
 
 load_models()
 
-MAX_SEQ_LEN = max((v[1] for v in MODEL_FILES.values()), default=20)
+MAX_SEQ_LEN = max((v[1] for v in MODEL_FILES.values()), default=19)
+
+# ─── Yahoo Finance 資料抓取 ───────────────────────────────────────────────────
+
+def fetch_yahoo(stock_no: str, months: int) -> list[dict]:
+    """
+    使用 yfinance 抓取台股資料
+    台股代號格式：2308 → 2308.TW
+    抓取範圍：months + 1 個月（補足 window 用）
+    """
+    symbol = f"{stock_no}.TW"
+
+    # 多抓 1 個月補足 window
+    end = datetime.now()
+    start = end - timedelta(days=(months + 1) * 31)
+
+    try:
+        ticker = yf.Ticker(symbol)
+        df = ticker.history(start=start.strftime('%Y-%m-%d'),
+                            end=end.strftime('%Y-%m-%d'),
+                            interval='1d')
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Yahoo Finance 資料抓取失敗：{e}")
+
+    if df.empty:
+        raise HTTPException(status_code=404,
+            detail=f"查無股票代號 {stock_no}（{symbol}）的資料，請確認代號是否正確")
+
+    rows = []
+    for ts, row in df.iterrows():
+        date_str = ts.strftime('%Y-%m-%d') if hasattr(ts, 'strftime') else str(ts)[:10]
+        open_  = round(float(row['Open']),   2) if pd.notna(row['Open'])   else None
+        high   = round(float(row['High']),   2) if pd.notna(row['High'])   else None
+        low    = round(float(row['Low']),    2) if pd.notna(row['Low'])    else None
+        close  = round(float(row['Close']),  2) if pd.notna(row['Close'])  else None
+        # yfinance volume 單位為「股」，換算為「張」（1張=1000股）
+        volume = int(row['Volume'] / 1000)       if pd.notna(row['Volume']) else None
+
+        rows.append({
+            "date":         date_str,
+            "symbol":       stock_no,
+            "open":         open_,
+            "high":         high,
+            "low":          low,
+            "close":        close,
+            "volume":       volume,
+            "transactions": None,   # Yahoo Finance 不提供成交筆數
+        })
+
+    rows.sort(key=lambda x: x["date"])
+    return rows
 
 # ─── Model Inference ──────────────────────────────────────────────────────────
 
@@ -75,11 +123,6 @@ def denormalize_price(pred_norm: float, window: list[dict]) -> float:
     return float(pred_norm * (c_max - c_min) + c_min)
 
 def run_predictions(all_rows: list[dict], target_dates: set) -> dict[str, list[dict]]:
-    """
-    all_rows: 含補足 window 的完整資料
-    target_dates: 使用者實際要顯示的日期集合
-    各模型依自己的 seq_len 取 window，只回傳 target_dates 內的預測
-    """
     results: dict[str, list[dict]] = {k: [] for k in MODELS}
 
     for i in range(MAX_SEQ_LEN, len(all_rows)):
@@ -93,7 +136,8 @@ def run_predictions(all_rows: list[dict], target_dates: set) -> dict[str, list[d
 
             window = all_rows[i - seq_len:i]
 
-            if any(r["open"] is None or r["close"] is None or r["volume"] is None for r in window):
+            if any(r["open"] is None or r["close"] is None or r["volume"] is None
+                   for r in window):
                 continue
 
             x = normalize_window(window)
@@ -114,21 +158,6 @@ def run_predictions(all_rows: list[dict], target_dates: set) -> dict[str, list[d
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
-def parse_number(s: str) -> Optional[float]:
-    if not s or s.strip() == "--":
-        return None
-    try:
-        return float(s.replace(",", ""))
-    except ValueError:
-        return None
-
-def twse_date_to_iso(s: str) -> str:
-    parts = s.strip().split("/")
-    if len(parts) == 3:
-        year = int(parts[0]) + 1911
-        return f"{year}-{parts[1]}-{parts[2]}"
-    return s
-
 def compute_daily_change(rows: list[dict]) -> list[dict]:
     result = []
     for i, row in enumerate(rows):
@@ -140,34 +169,6 @@ def compute_daily_change(rows: list[dict]) -> list[dict]:
             pct = 0.0
         result.append({**row, "daily_change_pct": pct})
     return result
-
-async def fetch_twse(stock_no: str, year: int, month: int) -> list[dict]:
-    params = {
-        "response": "json",
-        "date": f"{year}{str(month).zfill(2)}01",
-        "stockNo": stock_no,
-    }
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        resp = await client.get(TWSE_URL, params=params)
-        resp.raise_for_status()
-        data = resp.json()
-
-    if data.get("stat") != "OK" or not data.get("data"):
-        return []
-
-    rows = []
-    for row in data["data"]:
-        rows.append({
-            "date": twse_date_to_iso(row[0]),
-            "symbol": stock_no,
-            "volume": int(parse_number(row[1]) / 1000) if parse_number(row[1]) else None,
-            "open": parse_number(row[3]),
-            "high": parse_number(row[4]),
-            "low": parse_number(row[5]),
-            "close": parse_number(row[6]),
-            "transactions": int(parse_number(row[8])) if parse_number(row[8]) else None,
-        })
-    return rows
 
 def dedup_sort(rows: list[dict]) -> list[dict]:
     seen = set()
@@ -184,42 +185,28 @@ def dedup_sort(rows: list[dict]) -> list[dict]:
 @app.get("/api/stock/{stock_no}")
 async def get_stock_data(
     stock_no: str,
-    months: int = Query(default=1, ge=1, le=12, description="幾個月的資料"),
+    months: int = Query(default=3, ge=1, le=12, description="幾個月的資料"),
 ):
-    now = datetime.now()
+    """
+    取得個股每日交易資料 + 四模型預測收盤價
+    stock_no: 台股代號（如 2308、2330）
+    months: 1~12 個月
+    """
+    # 抓資料（含額外 1 個月 window）
+    all_rows = fetch_yahoo(stock_no, months)
+    all_rows = dedup_sort(all_rows)
 
-    # 1. 抓使用者要求的月份
-    user_rows = []
-    for i in range(months - 1, -1, -1):
-        target = now - timedelta(days=i * 30)
-        try:
-            rows = await fetch_twse(stock_no, target.year, target.month)
-            user_rows.extend(rows)
-        except Exception as e:
-            logger.warning(f"Failed to fetch {stock_no} {target.year}/{target.month}: {e}")
-
-    if not user_rows:
-        raise HTTPException(status_code=404, detail=f"查無股票代號 {stock_no} 的資料，請確認代號或稍後再試")
-
-    user_rows = dedup_sort(user_rows)
+    # 切出使用者要顯示的日期範圍
+    cutoff = (datetime.now() - timedelta(days=months * 31)).strftime('%Y-%m-%d')
+    user_rows = [r for r in all_rows if r["date"] >= cutoff]
     target_dates = {r["date"] for r in user_rows}
 
-    # 2. 額外往前抓 1 個月補足最大 window（MAX_SEQ_LEN = 20）
-    extra_rows = []
-    if MODELS:
-        extra_target = now - timedelta(days=months * 30)
-        try:
-            extra_rows = await fetch_twse(stock_no, extra_target.year, extra_target.month)
-        except Exception as e:
-            logger.warning(f"Failed to fetch extra window data: {e}")
+    if not user_rows:
+        raise HTTPException(status_code=404,
+            detail=f"查無股票代號 {stock_no} 的資料")
 
-    # 3. 合併排序
-    all_rows = dedup_sort(user_rows + extra_rows)
-
-    # 4. 計算漲跌幅
     result = compute_daily_change(user_rows)
 
-    # 5. 模型推論
     predictions = {}
     if MODELS:
         try:

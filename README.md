@@ -31,7 +31,7 @@
 
 
 
-1\. 期末專題 (1).ipynb / 期末專題(2).ipynb
+1\. LSTM_BiLSTM_GRU.ipynb.ipynb / Transformer.ipynb.ipynb **( 位置 /Training )**
 
 &#x20;  - 專案的主程式與實驗核心。
 
@@ -39,7 +39,7 @@
 
 
 
-2\. 2308.csv
+2\. 2308.csv **( 位置 /Training )**
 
 &#x20;  - 台灣股市台達電（2308）自 2020 年初至 2024 年底的歷史日 K 線數據。
 
@@ -47,7 +47,7 @@
 
 
 
-3\. 產出模型檔案
+3\. 產出模型檔案 **( 位置 /DL_Final_Project/backend/models )**
 
 &#x20;  - `LSTM_stock_model.onnx`
 

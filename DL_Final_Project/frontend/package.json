@@ -2,7 +2,7 @@
   "name": "stock-frontend",
   "version": "1.0.0",
   "private": true,
-  "homepage": "https://d1018600.github.io/DL-Final-Project/",
+  "homepage": "https://d1018600.github.io/DL2026_Team9_Stock_Prediction/",
   "dependencies": {
     "d3": "^7.9.0",
     "react": "^18.3.1",
